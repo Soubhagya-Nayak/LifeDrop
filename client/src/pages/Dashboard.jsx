@@ -25,11 +25,18 @@ const mapContainerStyle = {
 
 const fallbackCenter = { lat: 19.076, lng: 72.8777 };
 const ADMIN_RESET_EVENT = 'lifedrop-admin-reset-complete';
+const DONATION_COOLDOWN_DAYS = 112;
 const EMPTY_ADMIN_DATA = {
     stats: { donors: 0, eligibleDonors: 0, activeRequests: 0, criticalRequests: 0 },
     donors: [],
     patients: [],
     historyByDate: {},
+};
+
+const getCooldownDaysRemaining = (lastDonationDate) => {
+    if (!lastDonationDate) return 0;
+    const daysSince = Math.floor((Date.now() - new Date(lastDonationDate).getTime()) / (1000 * 60 * 60 * 24));
+    return Math.max(0, DONATION_COOLDOWN_DAYS - daysSince);
 };
 
 const statusTone = {
@@ -65,6 +72,16 @@ const Dashboard = () => {
     const [message, setMessage] = useState('');
     const [updatingDonorId, setUpdatingDonorId] = useState(null);
     const [selectedDonor, setSelectedDonor] = useState(null);
+
+    const visiblePatients = useMemo(
+        () => (adminData.patients || []).filter((patient) => !['Completed', 'Cancelled'].includes(patient.request_status)),
+        [adminData.patients]
+    );
+
+    const visibleDonors = useMemo(
+        () => (adminData.donors || []).filter((donor) => getCooldownDaysRemaining(donor.last_donation_date) === 0),
+        [adminData.donors]
+    );
 
     useEffect(() => {
         if (!loading && !user) {
@@ -137,14 +154,14 @@ const Dashboard = () => {
     };
 
     const mapCenter = useMemo(() => {
-        const donor = adminData.donors.find((item) => item.latitude && item.longitude);
-        const patient = adminData.patients.find((item) => item.latitude && item.longitude);
+        const donor = visibleDonors.find((item) => item.latitude && item.longitude);
+        const patient = visiblePatients.find((item) => item.latitude && item.longitude);
         const source = patient || donor;
 
         return source
             ? { lat: Number(source.latitude), lng: Number(source.longitude) }
             : fallbackCenter;
-    }, [adminData]);
+    }, [visibleDonors, visiblePatients]);
 
     if (loading || !user) {
         return (
@@ -202,7 +219,7 @@ const Dashboard = () => {
                         {googleMapsApiKey ? (
                             <LoadScript googleMapsApiKey={googleMapsApiKey}>
                                 <GoogleMap mapContainerStyle={mapContainerStyle} center={mapCenter} zoom={11}>
-                                    {adminData.donors.map((donor) => donor.latitude && donor.longitude && (
+                                    {visibleDonors.map((donor) => donor.latitude && donor.longitude && (
                                         <MarkerF
                                             key={`donor-${donor.id}`}
                                             position={{ lat: Number(donor.latitude), lng: Number(donor.longitude) }}
@@ -210,14 +227,14 @@ const Dashboard = () => {
                                             icon="https://maps.google.com/mapfiles/ms/icons/green-dot.png"
                                         />
                                     ))}
-                                    {adminData.patients.map((patient) => patient.latitude && patient.longitude && (
+                                    {visiblePatients.map((patient) => patient.latitude && patient.longitude && (
                                         <MarkerF
                                             key={`patient-${patient.id}`}
                                             position={{ lat: Number(patient.latitude), lng: Number(patient.longitude) }}
                                             label="P"
                                         />
                                     ))}
-                                    {adminData.patients.map((patient) => patient.latitude && patient.longitude && patient.nearest_donor_latitude && patient.nearest_donor_longitude && (
+                                    {visiblePatients.map((patient) => patient.latitude && patient.longitude && patient.nearest_donor_latitude && patient.nearest_donor_longitude && (
                                         <PolylineF
                                             key={`route-${patient.id}-${patient.nearest_donor_id}`}
                                             path={[
@@ -263,10 +280,10 @@ const Dashboard = () => {
                     </div>
 
                     <div className="mt-6 grid gap-4 xl:grid-cols-2">
-                        {adminData.patients.length === 0 ? (
+                        {visiblePatients.length === 0 ? (
                             <p className="rounded-3xl bg-slate-50 p-6 text-center text-sm font-semibold text-slate-500">No patient requests yet.</p>
                         ) : (
-                            adminData.patients.map((patient) => (
+                            visiblePatients.map((patient) => (
                                 <article key={patient.id} className="rounded-[28px] border border-rose-100 bg-white p-5">
                                     <div className="flex items-start justify-between gap-3">
                                         <div>
@@ -328,6 +345,7 @@ const Dashboard = () => {
                         <thead>
                             <tr className="text-xs font-black uppercase tracking-[0.2em] text-slate-400">
                                 <th className="px-4 py-4">Donor</th>
+                                <th className="px-4 py-4">Assigned Request</th>
                                 <th className="px-4 py-4">Blood</th>
                                 <th className="px-4 py-4">Eligibility</th>
                                 <th className="px-4 py-4">Availability</th>
@@ -338,7 +356,7 @@ const Dashboard = () => {
                             </tr>
                         </thead>
                         <tbody>
-                            {adminData.donors.map((donor) => (
+                            {visibleDonors.map((donor) => (
                                 <tr
                                     key={donor.id}
                                     className="cursor-pointer border-t border-rose-100 hover:bg-rose-50/30"
@@ -347,6 +365,15 @@ const Dashboard = () => {
                                     <td className="px-4 py-4">
                                         <p className="font-black text-slate-900">{donor.name}</p>
                                         <p className="text-sm font-semibold text-slate-500">{donor.phone}</p>
+                                    </td>
+                                    <td className="px-4 py-4">
+                                        <p className="text-sm font-black text-slate-900">
+                                            {donor.assigned_patient_name || 'No active request'}
+                                        </p>
+                                        <p className="text-xs font-bold uppercase tracking-[0.15em] text-slate-500">
+                                            {donor.assignment_role}
+                                            {donor.assigned_patient_blood_group ? ` - ${donor.assigned_patient_blood_group}` : ''}
+                                        </p>
                                     </td>
                                     <td className="px-4 py-4 text-lg font-black text-blood-DEFAULT">{donor.blood_group}</td>
                                     <td className="px-4 py-4">
@@ -398,7 +425,7 @@ const Dashboard = () => {
                         </tbody>
                     </table>
 
-                    {adminData.donors.length === 0 && (
+                    {visibleDonors.length === 0 && (
                         <div className="rounded-3xl bg-slate-50 p-8 text-center text-sm font-semibold text-slate-500">
                             No donor records yet.
                         </div>
@@ -504,6 +531,12 @@ const Dashboard = () => {
                                 <p className="text-sm font-bold text-slate-800">Blood Group: {selectedDonor.blood_group}</p>
                                 <p className="text-sm font-bold text-slate-800">Last Donation: {selectedDonor.last_donation_date ? new Date(selectedDonor.last_donation_date).toLocaleDateString() : 'No donation yet'}</p>
                                 <p className="text-sm font-bold text-slate-800">112-Day Rule: {selectedDonor.last_donation_date ? 'Check cooldown before next donation' : 'Eligible after approval'}</p>
+                            </div>
+                            <div className="rounded-3xl bg-sky-50 p-4 md:col-span-2">
+                                <p className="text-xs font-black uppercase tracking-[0.2em] text-slate-500">Current Assignment</p>
+                                <p className="mt-2 text-sm font-bold text-slate-800">Patient: {selectedDonor.assigned_patient_name || 'No active request assigned'}</p>
+                                <p className="text-sm font-bold text-slate-800">Role: {selectedDonor.assignment_role}</p>
+                                <p className="text-sm font-bold text-slate-800">Request Status: {selectedDonor.assigned_request_status || 'N/A'}</p>
                             </div>
                         </div>
 

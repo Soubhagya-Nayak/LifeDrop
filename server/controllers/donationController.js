@@ -119,36 +119,19 @@ exports.scanPatientQR = async (req, res) => {
 
 exports.getDonationHistory = async (req, res) => {
     try {
-        const isRequester = req.user.role === 'hospital';
-        const query = isRequester
-            ? `
-                SELECT d.id, d.status, d.created_at,
-                    br.id AS request_id, br.patient_name, br.blood_group_required,
-                    br.units_required, br.emergency_level, br.request_status,
-                    donor.name AS donor_name, donor.phone AS donor_phone,
-                    requester.name AS requester_name
-                FROM Donations d
-                JOIN BloodRequests br ON br.id = d.request_id
-                LEFT JOIN Users donor ON donor.id = d.primary_donor_id
-                JOIN Users requester ON requester.id = br.hospital_id
-                WHERE br.hospital_id = ?
-                ORDER BY d.created_at DESC
-            `
-            : `
-                SELECT d.id, d.status, d.created_at,
-                    br.id AS request_id, br.patient_name, br.blood_group_required,
-                    br.units_required, br.emergency_level, br.request_status,
-                    donor.name AS donor_name, donor.phone AS donor_phone,
-                    requester.name AS requester_name
-                FROM Donations d
-                JOIN BloodRequests br ON br.id = d.request_id
-                LEFT JOIN Users donor ON donor.id = d.primary_donor_id
-                JOIN Users requester ON requester.id = br.hospital_id
-                WHERE d.primary_donor_id = ?
-                ORDER BY d.created_at DESC
-            `;
-
-        const [rows] = await pool.query(query, [req.user.id]);
+        const [rows] = await pool.query(`
+            SELECT d.id, d.status, d.created_at,
+                br.id AS request_id, br.patient_name, br.blood_group_required,
+                br.units_required, br.emergency_level, br.request_status,
+                donor.name AS donor_name, donor.phone AS donor_phone,
+                requester.name AS requester_name
+            FROM Donations d
+            JOIN BloodRequests br ON br.id = d.request_id
+            LEFT JOIN Users donor ON donor.id = d.primary_donor_id
+            JOIN Users requester ON requester.id = br.hospital_id
+            WHERE d.primary_donor_id = ? OR br.hospital_id = ?
+            ORDER BY d.created_at DESC
+        `, [req.user.id, req.user.id]);
 
         res.json({ history: rows });
     } catch (err) {

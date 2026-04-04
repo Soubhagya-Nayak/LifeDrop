@@ -4,6 +4,7 @@ const { getDistance } = require('../utils/haversine');
 const { getCompatibleDonors, getDonationTargets } = require('../utils/compatibility');
 
 const DONATION_COOLDOWN_DAYS = 112;
+const DONOR_RADIUS_KM = 10;
 
 const expireOldRequests = async () => {
     await pool.query(`
@@ -45,8 +46,9 @@ exports.getDashboardRequests = async (req, res) => {
                 JOIN Users u ON u.id = br.hospital_id
                 WHERE br.request_status IN ('Created', 'Searching Donor', 'Primary Donor Assigned', 'Donation In Progress')
                 AND br.blood_group_required IN (?)
+                AND br.hospital_id <> ?
                 ORDER BY br.created_at DESC
-            `, [req.user.id, donationTargets]);
+            `, [req.user.id, donationTargets, req.user.id]);
 
             donateRequests = rows.map((request) => {
                 const distance = getDistance(
@@ -62,6 +64,7 @@ exports.getDashboardRequests = async (req, res) => {
                     has_joined: Boolean(request.has_joined),
                 };
             }).filter((request) => {
+                if (request.distance > DONOR_RADIUS_KM) return false;
                 if (!donorProfile.last_donation_date) return true;
                 const daysSince = Math.floor((new Date() - new Date(donorProfile.last_donation_date)) / (1000 * 60 * 60 * 24));
                 return daysSince >= DONATION_COOLDOWN_DAYS;
@@ -80,6 +83,14 @@ exports.getDashboardRequests = async (req, res) => {
             ORDER BY br.created_at DESC
         `, [req.user.id]);
 
+        const [notifications] = await pool.query(`
+            SELECT id, title, message, type, is_read, created_at
+            FROM Notifications
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 10
+        `, [req.user.id]);
+
         res.json({
             mode: req.user.role,
             donor: {
@@ -95,6 +106,7 @@ exports.getDashboardRequests = async (req, res) => {
             },
             donateRequests,
             myRequests: myRequestRows,
+            notifications,
             requests: req.user.role === 'hospital' ? myRequestRows : donateRequests,
         });
     } catch (err) {
@@ -129,7 +141,11 @@ exports.createRequest = async (req, res) => {
 
     try {
         await expireOldRequests();
-        const deviceId = String(request_device_id || `account-${hospital_id}`).trim();
+        const deviceId = String(request_device_id || '').trim();
+
+        if (!deviceId) {
+            return res.status(400).json({ msg: 'Device verification failed. Please reopen the app and try again.' });
+        }
 
         const [dailyRequests] = await pool.query(`
             SELECT id
@@ -187,6 +203,45 @@ exports.createRequest = async (req, res) => {
         const finalPatientQrCode = await qrcode.toDataURL(finalQrPayload);
         await pool.query('UPDATE BloodRequests SET patient_qr_code = ? WHERE id = ?', [finalPatientQrCode, result.insertId]);
 
+        const compatibleDonorGroups = getCompatibleDonors(blood_group_required);
+        if (compatibleDonorGroups.length > 0) {
+            const [candidateDonors] = await pool.query(`
+                SELECT u.id, u.name, u.latitude, u.longitude, u.last_donation_date
+                FROM Users u
+                LEFT JOIN HealthInfo h ON h.user_id = u.id
+                WHERE u.role = 'donor'
+                AND u.id <> ?
+                AND u.blood_group IN (?)
+                AND u.availability_status = 'Available'
+                AND u.aadhaar_verification_status = 'Verified'
+                AND COALESCE(h.eligibility_status, 'Not Submitted') = 'Eligible'
+                AND (
+                    u.last_donation_date IS NULL
+                    OR u.last_donation_date <= DATE_SUB(CURRENT_DATE, INTERVAL ${DONATION_COOLDOWN_DAYS} DAY)
+                )
+            `, [hospital_id, compatibleDonorGroups]);
+
+            const nearbyCompatibleDonors = candidateDonors.filter((donor) => (
+                donor.latitude
+                && donor.longitude
+                && getDistance(latitude, longitude, donor.latitude, donor.longitude) <= DONOR_RADIUS_KM
+            ));
+
+            if (nearbyCompatibleDonors.length > 0) {
+                const notificationRows = nearbyCompatibleDonors.map((donor) => [
+                    donor.id,
+                    `Blood request for ${blood_group_required}`,
+                    `${patient_name} needs ${units_required || 1} unit(s) within ${DONOR_RADIUS_KM} km. Open Donate Blood to respond.`,
+                    'Request',
+                ]);
+
+                await pool.query(
+                    'INSERT INTO Notifications (user_id, title, message, type) VALUES ?',
+                    [notificationRows]
+                );
+            }
+        }
+
         res.status(201).json({ msg: 'Blood request created', requestId: result.insertId });
     } catch (err) {
         console.error(err.message);
@@ -210,9 +265,10 @@ exports.getNearbyDonors = async (req, res) => {
             FROM Users u 
             LEFT JOIN HealthInfo h ON u.id = h.user_id 
             WHERE u.role = 'donor' 
+            AND u.id <> ?
             AND u.availability_status = 'Available'
             AND u.blood_group IN (?)
-        `, [compatibleGroups]);
+        `, [request.hospital_id, compatibleGroups]);
 
         const eligibleDonors = donors.filter(d => {
             if (d.eligibility_status !== 'Eligible') return false;
@@ -223,8 +279,7 @@ exports.getNearbyDonors = async (req, res) => {
             return true;
         });
 
-        // Calculate distance and filter 10km (or 20km for emergency)
-        let radius = request.emergency_level === 'Critical' ? 20 : 10;
+        const radius = DONOR_RADIUS_KM;
         
         const nearbyDonors = eligibleDonors.map(d => {
             const distance = getDistance(request.latitude, request.longitude, d.latitude, d.longitude);
@@ -280,7 +335,15 @@ exports.acceptRequest = async (req, res) => {
         }
 
         const request = requests[0];
+        if (request.hospital_id === donor_id) {
+            return res.status(403).json({ msg: 'You cannot donate blood for your own request.' });
+        }
+
         const newDistance = getDistance(request.latitude, request.longitude, donorInfo[0].latitude, donorInfo[0].longitude);
+
+        if (newDistance > DONOR_RADIUS_KM) {
+            return res.status(403).json({ msg: `You are ${newDistance.toFixed(1)} km away. Donation requests can only be accepted within ${DONOR_RADIUS_KM} km.` });
+        }
         
         // Re-calculate ranks
         let participants = allAccepted.map(a => {

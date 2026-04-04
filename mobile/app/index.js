@@ -20,6 +20,7 @@ import { useRouter } from 'expo-router';
 import {
     Activity,
     AlertTriangle,
+    Bell,
     Droplet,
     HeartPulse,
     LocateFixed,
@@ -37,6 +38,7 @@ import { Colors } from '../constants/theme';
 
 const palette = Colors.light;
 const REQUEST_DEVICE_ID_KEY = 'lifedrop_request_device_id';
+const LAST_REQUEST_DATE_KEY = 'lifedrop_last_request_date';
 
 const defaultRequestForm = {
     patient_name: '',
@@ -62,6 +64,14 @@ const getRequestDeviceId = async () => {
     return deviceId;
 };
 
+const getTodayKey = () => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+};
+
 const StatTile = ({ icon: Icon, label, value, color, background }) => (
     <View style={styles.statTile}>
         <View style={[styles.statIcon, { backgroundColor: background }]}>
@@ -83,6 +93,7 @@ export default function DashboardScreen() {
     const [locationLoading, setLocationLoading] = useState(false);
     const [locationReady, setLocationReady] = useState(false);
     const [locationError, setLocationError] = useState('Phone location permission is mandatory for all users.');
+    const [hasRequestedToday, setHasRequestedToday] = useState(false);
 
     const loadDashboard = useCallback(async () => {
         if (!user) return;
@@ -93,7 +104,11 @@ export default function DashboardScreen() {
                 api.get('/donation/history'),
             ]);
             setDashboard(dashboardRes.data);
-            setHistory(historyRes.data.history || []);
+            setHistory(
+                (historyRes.data.history || []).filter(
+                    (item) => item.status === 'Completed' || item.request_status === 'Completed'
+                )
+            );
         } catch (err) {
             Alert.alert('Dashboard Error', err.response?.data?.msg || 'Unable to load dashboard');
         } finally {
@@ -119,6 +134,25 @@ export default function DashboardScreen() {
     useEffect(() => {
         loadDashboard();
     }, [loadDashboard]);
+
+    useEffect(() => {
+        if (!user || !appMode) return undefined;
+
+        const intervalId = setInterval(() => {
+            loadDashboard();
+        }, 8000);
+
+        return () => clearInterval(intervalId);
+    }, [appMode, loadDashboard, user]);
+
+    useEffect(() => {
+        const syncDailyRequestLock = async () => {
+            const lastRequestDate = await AsyncStorage.getItem(LAST_REQUEST_DATE_KEY);
+            setHasRequestedToday(lastRequestDate === getTodayKey());
+        };
+
+        syncDailyRequestLock();
+    }, [user]);
 
     const syncCurrentLocation = useCallback(async () => {
         if (!user) return false;
@@ -209,11 +243,19 @@ export default function DashboardScreen() {
     };
 
     const donationRequests = useMemo(
-        () => dashboard?.donateRequests || dashboard?.requests || [],
+        () => (dashboard?.donateRequests || dashboard?.requests || []).filter(
+            (request) => request.hospital_id !== user?.id
+        ),
+        [dashboard, user?.id]
+    );
+    const donorNotifications = useMemo(
+        () => dashboard?.notifications || [],
         [dashboard]
     );
     const requesterRequests = useMemo(
-        () => dashboard?.myRequests || [],
+        () => (dashboard?.myRequests || []).filter(
+            (request) => !['Completed', 'Cancelled'].includes(request.request_status)
+        ),
         [dashboard]
     );
 
@@ -240,6 +282,15 @@ export default function DashboardScreen() {
     };
 
     const createRequest = async () => {
+        const lastRequestDate = await AsyncStorage.getItem(LAST_REQUEST_DATE_KEY);
+        const todayKey = getTodayKey();
+
+        if (lastRequestDate === todayKey || hasRequestedToday) {
+            setHasRequestedToday(true);
+            Alert.alert('Request Limit Reached', 'Only one blood request is allowed from this device in a single day. Please try tomorrow.');
+            return;
+        }
+
         if (!requestForm.patient_name.trim()) {
             Alert.alert('Missing Details', 'Enter the patient name to publish a request.');
             return;
@@ -259,6 +310,8 @@ export default function DashboardScreen() {
                 units_required: Number(requestForm.units_required) || 1,
                 request_device_id: await getRequestDeviceId(),
             });
+            await AsyncStorage.setItem(LAST_REQUEST_DATE_KEY, todayKey);
+            setHasRequestedToday(true);
             setRequestForm(defaultRequestForm);
             Alert.alert('Request Published', 'Compatible donors can now respond.');
             await loadDashboard();
@@ -323,7 +376,27 @@ export default function DashboardScreen() {
                 <Text style={styles.healthButtonText}>Update Health Eligibility</Text>
             </TouchableOpacity>
 
-                <Text style={styles.sectionTitle}>Nearby compatible requests</Text>
+            <Text style={styles.sectionTitle}>Matching Blood Alerts</Text>
+            {donorNotifications.length === 0 ? (
+                <View style={styles.emptyState}>
+                    <Text style={styles.emptyTitle}>No matching alerts yet</Text>
+                    <Text style={styles.emptyText}>When a nearby compatible receiver requests blood, alerts will appear here.</Text>
+                </View>
+            ) : (
+                donorNotifications.map((notification) => (
+                    <View key={notification.id} style={styles.notificationCard}>
+                        <View style={styles.notificationIcon}>
+                            <Bell size={18} color={palette.tint} />
+                        </View>
+                        <View style={styles.requestTitleWrap}>
+                            <Text style={styles.requestHospital}>{notification.title}</Text>
+                            <Text style={styles.notificationMessage}>{notification.message}</Text>
+                        </View>
+                    </View>
+                ))
+            )}
+
+            <Text style={styles.sectionTitle}>Nearby compatible requests</Text>
             {donationRequests.length === 0 ? (
                 <View style={styles.emptyState}>
                     <Text style={styles.emptyTitle}>No urgent requests near you</Text>
@@ -468,7 +541,9 @@ export default function DashboardScreen() {
                 </TouchableOpacity>
 
                 <TouchableOpacity style={styles.publishButton} onPress={createRequest} disabled={saving}>
-                    <Text style={styles.publishButtonText}>{saving ? 'Submitting...' : 'Submit Blood Request'}</Text>
+                    <Text style={styles.publishButtonText}>
+                        {saving ? 'Submitting...' : hasRequestedToday ? 'Request Locked Today' : 'Submit Blood Request'}
+                    </Text>
                 </TouchableOpacity>
             </View>
 
@@ -733,6 +808,26 @@ const styles = StyleSheet.create({
         borderColor: palette.border,
         marginBottom: 14,
     },
+    notificationCard: {
+        backgroundColor: palette.card,
+        borderRadius: 24,
+        borderWidth: 1,
+        borderColor: palette.border,
+        padding: 16,
+        marginBottom: 12,
+        flexDirection: 'row',
+        gap: 12,
+        alignItems: 'flex-start',
+    },
+    notificationIcon: {
+        width: 44,
+        height: 44,
+        borderRadius: 16,
+        backgroundColor: palette.softRose,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    notificationMessage: { marginTop: 6, fontSize: 13, lineHeight: 20, color: palette.dark, fontWeight: '700' },
     requestHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
     requestTitleWrap: { flex: 1 },
     requestHospital: { fontSize: 11, fontWeight: '900', color: palette.tint, textTransform: 'uppercase', letterSpacing: 1.4 },

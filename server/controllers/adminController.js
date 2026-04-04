@@ -26,6 +26,41 @@ exports.getOverview = async (req, res) => {
             ORDER BY u.updated_at DESC
         `);
 
+        const [assignmentRows] = await pool.query(`
+            SELECT bd.donor_id, bd.rank_order, bd.status,
+                br.id AS request_id, br.patient_name, br.blood_group_required, br.request_status
+            FROM BackupDonors bd
+            JOIN BloodRequests br ON br.id = bd.request_id
+            WHERE br.request_status NOT IN ('Completed', 'Cancelled')
+            ORDER BY bd.rank_order ASC, br.created_at DESC
+        `);
+
+        const assignmentByDonor = assignmentRows.reduce((acc, row) => {
+            if (!acc[row.donor_id]) {
+                const queueRole = row.status === 'Promoted' || row.rank_order === 1
+                    ? 'Primary'
+                    : `Backup #${row.rank_order}`;
+
+                acc[row.donor_id] = {
+                    assignment_role: queueRole,
+                    assigned_patient_name: row.patient_name,
+                    assigned_patient_blood_group: row.blood_group_required,
+                    assigned_request_id: row.request_id,
+                    assigned_request_status: row.request_status,
+                };
+            }
+            return acc;
+        }, {});
+
+        const donorsWithAssignments = donors.map((donor) => ({
+            ...donor,
+            assignment_role: assignmentByDonor[donor.id]?.assignment_role || 'Unassigned',
+            assigned_patient_name: assignmentByDonor[donor.id]?.assigned_patient_name || null,
+            assigned_patient_blood_group: assignmentByDonor[donor.id]?.assigned_patient_blood_group || null,
+            assigned_request_id: assignmentByDonor[donor.id]?.assigned_request_id || null,
+            assigned_request_status: assignmentByDonor[donor.id]?.assigned_request_status || null,
+        }));
+
         const [patients] = await pool.query(`
             SELECT br.id, br.patient_name, br.blood_group_required, br.latitude, br.longitude,
                 br.patient_aadhaar_number, br.patient_aadhaar_document_name, br.patient_qr_code,
@@ -64,7 +99,7 @@ exports.getOverview = async (req, res) => {
                     eligibility_status: queuedCandidate.eligibility_status,
                     distance: getDistance(patient.latitude, patient.longitude, queuedCandidate.latitude, queuedCandidate.longitude),
                 }
-                : donors
+                    : donorsWithAssignments
                     .filter((donor) => donor.eligibility_status === 'Eligible' && donor.latitude && donor.longitude)
                     .map((donor) => ({
                         id: donor.id,
@@ -96,8 +131,8 @@ exports.getOverview = async (req, res) => {
         }));
 
         const stats = {
-            donors: donors.length,
-            eligibleDonors: donors.filter((donor) => donor.eligibility_status === 'Eligible').length,
+            donors: donorsWithAssignments.length,
+            eligibleDonors: donorsWithAssignments.filter((donor) => donor.eligibility_status === 'Eligible').length,
             activeRequests: patientsWithDistance.filter((patient) => !['Completed', 'Cancelled'].includes(patient.request_status)).length,
             criticalRequests: patientsWithDistance.filter((patient) => patient.emergency_level === 'Critical').length,
         };
@@ -125,7 +160,7 @@ exports.getOverview = async (req, res) => {
             return acc;
         }, {});
 
-        res.json({ stats, donors, patients: patientsWithDistance, historyByDate });
+        res.json({ stats, donors: donorsWithAssignments, patients: patientsWithDistance, historyByDate });
     } catch (err) {
         console.error(err.message);
         res.status(500).send('Server Error');

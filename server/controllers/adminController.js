@@ -1,5 +1,6 @@
 const pool = require('../config/db');
 const { getDistance } = require('../utils/haversine');
+const { ensureDefaultAdmin } = require('../utils/ensureDefaultAdmin');
 
 const DONATION_COOLDOWN_DAYS = 112;
 
@@ -9,6 +10,7 @@ exports.getOverview = async (req, res) => {
     }
 
     try {
+        await ensureDefaultAdmin();
         const [donors] = await pool.query(`
             SELECT u.id, u.name, u.phone, u.blood_group, u.latitude, u.longitude,
                 u.donation_count, u.availability_status, u.last_donation_date,
@@ -258,6 +260,7 @@ exports.resetOperationalData = async (req, res) => {
     let connection;
 
     try {
+        await ensureDefaultAdmin();
         connection = await pool.getConnection();
         await connection.query('SET FOREIGN_KEY_CHECKS = 0');
         await connection.query('DELETE FROM Notifications');
@@ -279,6 +282,7 @@ exports.resetOperationalData = async (req, res) => {
         await connection.query('ALTER TABLE HealthInfo AUTO_INCREMENT = 1');
         await connection.query("DELETE FROM Users WHERE role <> 'admin'");
         await connection.query('SET FOREIGN_KEY_CHECKS = 1');
+        await ensureDefaultAdmin();
 
         res.json({
             msg: 'All donor and receiver data erased. Admin accounts preserved.',

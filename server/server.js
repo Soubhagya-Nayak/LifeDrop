@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
+const { ensureDefaultAdmin } = require('./utils/ensureDefaultAdmin');
 
 const app = express();
 
@@ -16,6 +17,14 @@ app.use('/api/admin', require('./routes/admin'));
 
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+const startServer = async () => {
+    await ensureDefaultAdmin();
+    app.listen(PORT, () => {
+        console.log(`Server running on port ${PORT}`);
+    });
+};
+
+startServer().catch((err) => {
+    console.error('Server startup failed:', err.message);
+    process.exit(1);
 });

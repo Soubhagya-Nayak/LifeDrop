@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
+const { ensureDefaultAdmin } = require('../utils/ensureDefaultAdmin');
 
 const calculateTrustScore = ({ aadhaar_number, aadhaar_document_name }) => {
     let score = 40;
@@ -38,6 +39,7 @@ exports.register = async (req, res) => {
     }
 
     try {
+        await ensureDefaultAdmin();
         const [existing] = await pool.query('SELECT * FROM Users WHERE phone = ?', [normalizedPhone]);
         if (existing.length > 0) return res.status(400).json({ msg: 'User already exists' });
 
@@ -85,6 +87,7 @@ exports.login = async (req, res) => {
     const normalizedPhone = String(phone || '').trim();
 
     try {
+        await ensureDefaultAdmin();
         const [users] = await pool.query('SELECT * FROM Users WHERE phone = ?', [normalizedPhone]);
         if (users.length === 0) return res.status(400).json({ msg: 'Invalid Credentials' });
 
